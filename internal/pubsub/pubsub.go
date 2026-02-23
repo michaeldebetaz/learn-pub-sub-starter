@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -65,4 +66,33 @@ func DeclareAndBind(conn *amqp.Connection, exchange, queueName, key string, queu
 	}
 
 	return ch, queue, nil
+}
+
+func SubscribeJSON[T any](conn *amqp.Connection, exchange, queueName, key string, queueType SimpleQueueType, handler func(T)) error {
+	ch, queue, err := DeclareAndBind(conn, exchange, queueName, key, queueType)
+	if err != nil {
+		err := fmt.Errorf("failed to declare and bind: %w", err)
+		return err
+	}
+
+	deliveriesCh, err := ch.Consume(queue.Name, "", false, false, false, false, nil)
+	if err != nil {
+		err := fmt.Errorf("failed to consume messages: %w", err)
+		return err
+	}
+
+	go func() {
+		for delivery := range deliveriesCh {
+			var v T
+			if err := json.Unmarshal(delivery.Body, &v); err != nil {
+				slog.Error("failed to unmarshal delivery body", "error", err)
+				delivery.Nack(false, false)
+				continue
+			}
+
+			handler(v)
+		}
+	}()
+
+	return nil
 }

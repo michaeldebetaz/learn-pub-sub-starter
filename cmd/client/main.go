@@ -33,12 +33,11 @@ func main() {
 	queueName := routing.PauseKey + "." + username
 	key := routing.PauseKey
 	queueType := pubsub.QueueTypeTransient
-	if _, _, err := pubsub.DeclareAndBind(conn, exchange, queueName, key, queueType); err != nil {
+	gs := gamelogic.NewGameState(username)
+	if err := pubsub.SubscribeJSON(conn, exchange, queueName, key, queueType, handlerPause(gs)); err != nil {
 		err := fmt.Errorf("CLIENT: failed to declare and bind queue: %w", err)
 		log.Fatal(err)
 	}
-
-	gamestate := gamelogic.NewGameState(username)
 
 	for {
 		words := gamelogic.GetInput()
@@ -50,13 +49,13 @@ func main() {
 
 		switch command {
 		case "spawn":
-			if err := gamestate.CommandSpawn(words); err != nil {
+			if err := gs.CommandSpawn(words); err != nil {
 				err := fmt.Errorf("CLIENT: failed to execute spawn command: %w", err)
 				log.Print(err)
 			}
 
 		case "move":
-			move, err := gamestate.CommandMove(words)
+			move, err := gs.CommandMove(words)
 			if err != nil {
 				err := fmt.Errorf("CLIENT: failed to execute move command: %w", err)
 				log.Print(err)
@@ -65,7 +64,7 @@ func main() {
 			slog.Info("CLIENT: move successful", "move", move)
 
 		case "status":
-			gamestate.CommandStatus()
+			gs.CommandStatus()
 
 		case "help":
 			gamelogic.PrintClientHelp()
@@ -82,4 +81,10 @@ func main() {
 			gamelogic.PrintClientHelp()
 		}
 	}
+}
+
+func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
+	defer fmt.Print("> ")
+
+	return gs.HandlePause
 }
