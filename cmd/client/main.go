@@ -14,28 +14,36 @@ import (
 const URL = "amqp://guest:guest@localhost:5672/"
 
 func main() {
-	slog.Info("CLIENT: starting Peril client...")
+	slog.Info("Starting Peril client...")
 
 	conn, err := amqp.Dial(URL)
 	if err != nil {
-		err := fmt.Errorf("CLIENT: failed to connect to AMQP: %w", err)
+		err := fmt.Errorf("Error: failed to connect to AMQP: %w", err)
 		log.Fatal(err)
 	}
 	defer conn.Close()
 
-	username, err := gamelogic.ClientWelcome()
+	ch, err := conn.Channel()
 	if err != nil {
-		err := fmt.Errorf("CLIENT: failed to welcome client: %w", err)
+		err := fmt.Errorf("Error: failed to open channel: %w", err)
 		log.Fatal(err)
 	}
 
-	exchange := routing.ExchangePerilDirect
-	queueName := routing.PauseKey + "." + username
-	key := routing.PauseKey
-	queueType := pubsub.QueueTypeTransient
+	username, err := gamelogic.ClientWelcome()
+	if err != nil {
+		err := fmt.Errorf("Error: failed to welcome client: %w", err)
+		log.Fatal(err)
+	}
+
 	gs := gamelogic.NewGameState(username)
-	if err := pubsub.SubscribeJSON(conn, exchange, queueName, key, queueType, handlerPause(gs)); err != nil {
-		err := fmt.Errorf("CLIENT: failed to declare and bind queue: %w", err)
+
+	if err := subscribeToPerilDirect(conn, gs, username); err != nil {
+		err := fmt.Errorf("Error: failed to subscribe to Peril Direct: %w", err)
+		log.Fatal(err)
+	}
+
+	if err := subscribeToArmyMoves(conn, gs, username); err != nil {
+		err := fmt.Errorf("Error: failed to subscribe to Army Moves: %w", err)
 		log.Fatal(err)
 	}
 
@@ -50,18 +58,25 @@ func main() {
 		switch command {
 		case "spawn":
 			if err := gs.CommandSpawn(words); err != nil {
-				err := fmt.Errorf("CLIENT: failed to execute spawn command: %w", err)
+				err := fmt.Errorf("Error: failed to execute spawn command: %w", err)
 				log.Print(err)
 			}
 
 		case "move":
 			move, err := gs.CommandMove(words)
 			if err != nil {
-				err := fmt.Errorf("CLIENT: failed to execute move command: %w", err)
+				err := fmt.Errorf("Error: failed to execute move command: %w", err)
 				log.Print(err)
 				continue
 			}
-			slog.Info("CLIENT: move successful", "move", move)
+
+			exchange := routing.ExchangePerilTopic
+			key := routing.ArmyMovesPrefix + "." + username
+			if err := pubsub.PublishJSON(ch, exchange, key, move); err != nil {
+				err := fmt.Errorf("Error: failed to publish move command: %w", err)
+				log.Print(err)
+			}
+			slog.Info("Move published", "move", move)
 
 		case "status":
 			gs.CommandStatus()
@@ -70,21 +85,54 @@ func main() {
 			gamelogic.PrintClientHelp()
 
 		case "spam":
-			slog.Info("CLIENT: spamming not allowed yet!")
+			slog.Info("Spamming not allowed yet!")
 
 		case "quit":
-			slog.Info("CLIENT: quitting game...")
+			slog.Info("Quitting game...")
 			return
 
 		default:
-			slog.Info("CLIENT: unrecognized command")
+			slog.Error("Unrecognized command")
 			gamelogic.PrintClientHelp()
 		}
 	}
 }
 
-func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
-	defer fmt.Print("> ")
+func subscribeToPerilDirect(conn *amqp.Connection, gs *gamelogic.GameState, username string) error {
+	exchange := routing.ExchangePerilDirect
+	queueName := routing.PauseKey + "." + username
+	key := routing.PauseKey
+	queueType := pubsub.QueueTypeTransient
+	if err := pubsub.SubscribeJSON(conn, exchange, queueName, key, queueType, handlerPause(gs)); err != nil {
+		err := fmt.Errorf("Error: failed to declare and bind queue: %w", err)
+		return err
+	}
+	return nil
+}
 
-	return gs.HandlePause
+func subscribeToArmyMoves(conn *amqp.Connection, gs *gamelogic.GameState, username string) error {
+	exchange := routing.ExchangePerilTopic
+	queueName := routing.ArmyMovesPrefix + "." + username
+	key := routing.ArmyMovesPrefix + ".*"
+	queueType := pubsub.QueueTypeTransient
+	if err := pubsub.SubscribeJSON(conn, exchange, queueName, key, queueType, handlerArmyMove(gs)); err != nil {
+		err := fmt.Errorf("Error: failed to declare and bind queue: %w", err)
+		return err
+	}
+	return nil
+}
+
+func handlerArmyMove(gs *gamelogic.GameState) func(gamelogic.ArmyMove) {
+	defer fmt.Print("> ")
+	return func(move gamelogic.ArmyMove) {
+		defer fmt.Print("> ")
+		gs.HandleMove(move)
+	}
+}
+
+func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
+	return func(ps routing.PlayingState) {
+		defer fmt.Print("> ")
+		gs.HandlePause(ps)
+	}
 }
