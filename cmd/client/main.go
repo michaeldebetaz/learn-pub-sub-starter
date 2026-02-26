@@ -122,17 +122,24 @@ func subscribeToArmyMoves(conn *amqp.Connection, gs *gamelogic.GameState, userna
 	return nil
 }
 
-func handlerArmyMove(gs *gamelogic.GameState) func(gamelogic.ArmyMove) {
+func handlerArmyMove(gs *gamelogic.GameState) func(gamelogic.ArmyMove) pubsub.AckType {
 	defer fmt.Print("> ")
-	return func(move gamelogic.ArmyMove) {
+	return func(move gamelogic.ArmyMove) pubsub.AckType {
 		defer fmt.Print("> ")
-		gs.HandleMove(move)
+
+		outcome := gs.HandleMove(move)
+		if outcome == gamelogic.MoveOutcomeSafe || outcome == gamelogic.MoveOutcomeMakeWar {
+			return pubsub.Ack
+		} else {
+			return pubsub.NackDiscard
+		}
 	}
 }
 
-func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
-	return func(ps routing.PlayingState) {
+func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.AckType {
+	return func(ps routing.PlayingState) pubsub.AckType {
 		defer fmt.Print("> ")
 		gs.HandlePause(ps)
+		return pubsub.Ack
 	}
 }

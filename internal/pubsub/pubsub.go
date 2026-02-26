@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/bootdotdev/learn-pub-sub-starter/internal/routing"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -54,7 +55,10 @@ func DeclareAndBind(conn *amqp.Connection, exchange, queueName, key string, queu
 	autoDelete := queueType == QueueTypeTransient
 	exclusive := queueType == QueueTypeTransient
 	noWait := false
-	queue, err := ch.QueueDeclare(queueName, durable, autoDelete, exclusive, noWait, nil)
+	table := amqp.Table{
+		"x-dead-letter-exchange": routing.ExchangePerilDLX,
+	}
+	queue, err := ch.QueueDeclare(queueName, durable, autoDelete, exclusive, noWait, table)
 	if err != nil {
 		err := fmt.Errorf("failed to declare queue: %w", err)
 		return nil, amqp.Queue{}, err
@@ -68,7 +72,15 @@ func DeclareAndBind(conn *amqp.Connection, exchange, queueName, key string, queu
 	return ch, queue, nil
 }
 
-func SubscribeJSON[T any](conn *amqp.Connection, exchange, queueName, key string, queueType SimpleQueueType, handler func(T)) error {
+type AckType int
+
+const (
+	Ack AckType = iota
+	NackRequeue
+	NackDiscard
+)
+
+func SubscribeJSON[T any](conn *amqp.Connection, exchange, queueName, key string, queueType SimpleQueueType, handler func(T) AckType) error {
 	ch, queue, err := DeclareAndBind(conn, exchange, queueName, key, queueType)
 	if err != nil {
 		err := fmt.Errorf("failed to declare and bind: %w", err)
@@ -90,7 +102,30 @@ func SubscribeJSON[T any](conn *amqp.Connection, exchange, queueName, key string
 				continue
 			}
 
-			handler(v)
+			ackType := handler(v)
+			switch ackType {
+			case Ack:
+				if err := delivery.Ack(false); err != nil {
+					err := fmt.Errorf("failed to acknowledge message: %w", err)
+					slog.Error("failed to acknowledge message", "error", err)
+				}
+				slog.Info("message acked")
+			case NackRequeue:
+				if err := delivery.Nack(false, true); err != nil {
+					err := fmt.Errorf("failed to nack message with requeue: %w", err)
+					slog.Error("failed to nack message with requeue", "error", err)
+				}
+				slog.Info("message nacked with requeue")
+			case NackDiscard:
+				if err := delivery.Nack(false, false); err != nil {
+					err := fmt.Errorf("failed to nack message without requeue: %w", err)
+					slog.Error("failed to nack message without requeue", "error", err)
+				}
+				slog.Info("message nacked without requeue")
+
+			default:
+				slog.Error("invalid AckType returned by handler", "ackType", ackType)
+			}
 		}
 	}()
 
