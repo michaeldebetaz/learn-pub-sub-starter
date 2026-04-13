@@ -47,6 +47,11 @@ func main() {
 		log.Fatal(err)
 	}
 
+	if err := subscribeToWars(conn, gs); err != nil {
+		err := fmt.Errorf("Error: failed to subscribe to Wars: %w", err)
+		log.Fatal(err)
+	}
+
 	for {
 		words := gamelogic.GetInput()
 		if len(words) == 0 {
@@ -104,7 +109,7 @@ func subscribeToPerilDirect(conn *amqp.Connection, gs *gamelogic.GameState, user
 	key := routing.PauseKey
 	queueType := pubsub.QueueTypeTransient
 	if err := pubsub.SubscribeJSON(conn, exchange, queueName, key, queueType, handlerPause(gs)); err != nil {
-		err := fmt.Errorf("Error: failed to declare and bind queue: %w", err)
+		err := fmt.Errorf("failed to declare and bind queue: %w", err)
 		return err
 	}
 	return nil
@@ -115,24 +120,56 @@ func subscribeToArmyMoves(conn *amqp.Connection, gs *gamelogic.GameState, userna
 	queueName := routing.ArmyMovesPrefix + "." + username
 	key := routing.ArmyMovesPrefix + ".*"
 	queueType := pubsub.QueueTypeTransient
-	if err := pubsub.SubscribeJSON(conn, exchange, queueName, key, queueType, handlerArmyMove(gs)); err != nil {
-		err := fmt.Errorf("Error: failed to declare and bind queue: %w", err)
+	if err := pubsub.SubscribeJSON(conn, exchange, queueName, key, queueType, handlerArmyMove(conn, gs)); err != nil {
+		err := fmt.Errorf("failed to declare and bind queue: %w", err)
 		return err
 	}
 	return nil
 }
 
-func handlerArmyMove(gs *gamelogic.GameState) func(gamelogic.ArmyMove) pubsub.AckType {
+func subscribeToWars(conn *amqp.Connection, gs *gamelogic.GameState) error {
+	exchange := routing.ExchangePerilTopic
+	queueName := "war"
+	key := routing.WarRecognitionsPrefix + ".*"
+	queueType := pubsub.QueueTypeDurable
+	if err := pubsub.SubscribeJSON(conn, exchange, queueName, key, queueType, handlerWar(gs)); err != nil {
+		err := fmt.Errorf("failed to declare and bind queue: %w", err)
+		return err
+	}
+	return nil
+}
+
+func handlerArmyMove(conn *amqp.Connection, gs *gamelogic.GameState) func(gamelogic.ArmyMove) pubsub.AckType {
 	defer fmt.Print("> ")
 	return func(move gamelogic.ArmyMove) pubsub.AckType {
 		defer fmt.Print("> ")
 
 		outcome := gs.HandleMove(move)
-		if outcome == gamelogic.MoveOutcomeSafe || outcome == gamelogic.MoveOutcomeMakeWar {
+		switch outcome {
+		case gamelogic.MoveOutcomeSafe:
 			return pubsub.Ack
-		} else {
-			return pubsub.NackDiscard
+
+		case gamelogic.MoveOutcomeMakeWar:
+			ch, err := conn.Channel()
+			if err != nil {
+				slog.Error("Failed to open channel", "error", err)
+				return pubsub.NackDiscard
+			}
+			exchange := routing.ExchangePerilTopic
+			key := routing.WarRecognitionsPrefix + "." + gs.GetUsername()
+			val := gamelogic.RecognitionOfWar{
+				Attacker: move.Player,
+				Defender: gs.GetPlayerSnap(),
+			}
+			if err := pubsub.PublishJSON(ch, exchange, key, val); err != nil {
+				slog.Error("Failed to publish war recognition", "error", err)
+				return pubsub.NackRequeue
+			}
+
+			return pubsub.Ack
 		}
+
+		return pubsub.NackDiscard
 	}
 }
 
@@ -141,5 +178,28 @@ func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.Ack
 		defer fmt.Print("> ")
 		gs.HandlePause(ps)
 		return pubsub.Ack
+	}
+}
+
+func handlerWar(gs *gamelogic.GameState) func(gamelogic.RecognitionOfWar) pubsub.AckType {
+	return func(rw gamelogic.RecognitionOfWar) pubsub.AckType {
+		defer fmt.Print("> ")
+
+		outcome, _, _ := gs.HandleWar(rw)
+		switch outcome {
+		case gamelogic.WarOutcomeNotInvolved:
+			return pubsub.NackRequeue
+		case gamelogic.WarOutcomeNoUnits:
+			return pubsub.NackDiscard
+		case gamelogic.WarOutcomeOpponentWon:
+			return pubsub.Ack
+		case gamelogic.WarOutcomeYouWon:
+			return pubsub.Ack
+		case gamelogic.WarOutcomeDraw:
+			return pubsub.Ack
+		default:
+			slog.Error("Invalid war outcome", "outcome", outcome)
+			return pubsub.NackDiscard
+		}
 	}
 }

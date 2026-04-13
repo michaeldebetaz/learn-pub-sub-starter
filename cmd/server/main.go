@@ -48,7 +48,7 @@ func main() {
 		command := inputs[0]
 		switch command {
 		case "pause":
-			slog.Info("Error: pausing game...")
+			slog.Info("Pausing game...")
 
 			playingState := routing.PlayingState{IsPaused: true}
 			if err := publishPlayingState(ch, playingState); err != nil {
@@ -57,7 +57,7 @@ func main() {
 			}
 
 		case "resume":
-			slog.Info("Error: resuming game...")
+			slog.Info("Resuming game...")
 
 			playingState := routing.PlayingState{IsPaused: false}
 			if err := publishPlayingState(ch, playingState); err != nil {
@@ -66,7 +66,7 @@ func main() {
 			}
 
 		case "quit":
-			slog.Info("Error: quitting game...")
+			slog.Info("Quitting game...")
 			return
 
 		default:
