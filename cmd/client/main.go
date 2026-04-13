@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"strconv"
+	"time"
 
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/gamelogic"
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/pubsub"
@@ -63,24 +65,24 @@ func main() {
 		switch command {
 		case "spawn":
 			if err := gs.CommandSpawn(words); err != nil {
-				err := fmt.Errorf("Error: failed to execute spawn command: %w", err)
-				log.Print(err)
+				slog.Error("Error: failed to execute spawn command", "error", err)
+				continue
 			}
 
 		case "move":
 			move, err := gs.CommandMove(words)
 			if err != nil {
-				err := fmt.Errorf("Error: failed to execute move command: %w", err)
-				log.Print(err)
+				slog.Error("Error: failed to execute move command", "error", err)
 				continue
 			}
 
 			exchange := routing.ExchangePerilTopic
 			key := routing.ArmyMovesPrefix + "." + username
 			if err := pubsub.PublishJSON(ch, exchange, key, move); err != nil {
-				err := fmt.Errorf("Error: failed to publish move command: %w", err)
-				log.Print(err)
+				slog.Error("Failed to publish move command", "error", err)
+				continue
 			}
+
 			slog.Info("Move published", "move", move)
 
 		case "status":
@@ -90,7 +92,27 @@ func main() {
 			gamelogic.PrintClientHelp()
 
 		case "spam":
-			slog.Info("Spamming not allowed yet!")
+			if len(words) < 2 {
+				slog.Error("Usage: spam <number of moves>")
+				continue
+			}
+
+			n, err := strconv.Atoi(words[1])
+			if err != nil {
+				slog.Error("Invalid number for spam command", "input", words[1], "error", err)
+				continue
+			}
+
+			for range n {
+				log := gamelogic.GetMaliciousLog()
+				exchange := routing.ExchangePerilTopic
+				key := routing.GameLogSlug + "." + username
+				pubsub.PublishGob(ch, exchange, key, routing.GameLog{
+					CurrentTime: time.Now(),
+					Message:     log,
+					Username:    username,
+				})
+			}
 
 		case "quit":
 			slog.Info("Quitting game...")
@@ -132,7 +154,7 @@ func subscribeToWars(conn *amqp.Connection, gs *gamelogic.GameState) error {
 	queueName := "war"
 	key := routing.WarRecognitionsPrefix + ".*"
 	queueType := pubsub.QueueTypeDurable
-	if err := pubsub.SubscribeJSON(conn, exchange, queueName, key, queueType, handlerWar(gs)); err != nil {
+	if err := pubsub.SubscribeJSON(conn, exchange, queueName, key, queueType, handlerWar(conn, gs)); err != nil {
 		err := fmt.Errorf("failed to declare and bind queue: %w", err)
 		return err
 	}
@@ -140,7 +162,6 @@ func subscribeToWars(conn *amqp.Connection, gs *gamelogic.GameState) error {
 }
 
 func handlerArmyMove(conn *amqp.Connection, gs *gamelogic.GameState) func(gamelogic.ArmyMove) pubsub.AckType {
-	defer fmt.Print("> ")
 	return func(move gamelogic.ArmyMove) pubsub.AckType {
 		defer fmt.Print("> ")
 
@@ -181,21 +202,42 @@ func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.Ack
 	}
 }
 
-func handlerWar(gs *gamelogic.GameState) func(gamelogic.RecognitionOfWar) pubsub.AckType {
+func handlerWar(conn *amqp.Connection, gs *gamelogic.GameState) func(gamelogic.RecognitionOfWar) pubsub.AckType {
 	return func(rw gamelogic.RecognitionOfWar) pubsub.AckType {
 		defer fmt.Print("> ")
 
-		outcome, _, _ := gs.HandleWar(rw)
+		ch, err := conn.Channel()
+		if err != nil {
+			slog.Error("Failed to open channel", "error", err)
+			return pubsub.NackDiscard
+		}
+
+		outcome, winner, loser := gs.HandleWar(rw)
 		switch outcome {
 		case gamelogic.WarOutcomeNotInvolved:
 			return pubsub.NackRequeue
 		case gamelogic.WarOutcomeNoUnits:
 			return pubsub.NackDiscard
 		case gamelogic.WarOutcomeOpponentWon:
+			message := fmt.Sprintf("%s won a war against %s", winner, loser)
+			if err := pubsub.PublishGamelog(ch, gs.GetUsername(), message); err != nil {
+				slog.Error("Failed to publish gamelog", "error", err)
+				return pubsub.NackRequeue
+			}
 			return pubsub.Ack
 		case gamelogic.WarOutcomeYouWon:
+			message := fmt.Sprintf("%s won a war against %s", winner, loser)
+			if err := pubsub.PublishGamelog(ch, gs.GetUsername(), message); err != nil {
+				slog.Error("Failed to publish gamelog", "error", err)
+				return pubsub.NackRequeue
+			}
 			return pubsub.Ack
 		case gamelogic.WarOutcomeDraw:
+			message := fmt.Sprintf("A war between %s and %s resulted in a draw", winner, loser)
+			if err := pubsub.PublishGamelog(ch, gs.GetUsername(), message); err != nil {
+				slog.Error("Failed to publish gamelog", "error", err)
+				return pubsub.NackRequeue
+			}
 			return pubsub.Ack
 		default:
 			slog.Error("Invalid war outcome", "outcome", outcome)

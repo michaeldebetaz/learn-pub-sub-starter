@@ -29,13 +29,16 @@ func main() {
 	queueName := routing.GameLogSlug
 	key := routing.GameLogSlug + ".*"
 	queueType := pubsub.QueueTypeDurable
-	ch, queue, err := pubsub.DeclareAndBind(conn, exchange, queueName, key, queueType)
-	if err != nil {
-		err := fmt.Errorf("Error: failed to declare and bind queue: %w", err)
+	if err := pubsub.SubscribeGob(conn, exchange, queueName, key, queueType, handlerGameLogs()); err != nil {
+		err := fmt.Errorf("Error: failed to subscribe to game_logs queue: %w", err)
 		log.Fatal(err)
 	}
 
-	slog.Info("Server declared and bound queue.", "queueName", queue.Name)
+	ch, err := conn.Channel()
+	if err != nil {
+		err := fmt.Errorf("Error: failed to open channel: %w", err)
+		log.Fatal(err)
+	}
 
 	gamelogic.PrintServerHelp()
 
@@ -86,4 +89,16 @@ func publishPlayingState(ch *amqp.Channel, playingState routing.PlayingState) er
 	}
 
 	return nil
+}
+
+func handlerGameLogs() func(routing.GameLog) pubsub.AckType {
+	return func(gl routing.GameLog) pubsub.AckType {
+		defer fmt.Print("> ")
+		if err := gamelogic.WriteLog(gl); err != nil {
+			slog.Error("Failed to write game log", "error", err)
+			return pubsub.NackDiscard
+		}
+
+		return pubsub.Ack
+	}
 }
