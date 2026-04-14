@@ -123,6 +123,11 @@ func SubscribeJSON[T any](conn *amqp.Connection, exchange, queueName, key string
 		return err
 	}
 
+	if err := ch.Qos(10, 0, false); err != nil {
+		err := fmt.Errorf("failed to set QoS: %w", err)
+		return err
+	}
+
 	deliveriesCh, err := ch.Consume(queue.Name, "", false, false, false, false, nil)
 	if err != nil {
 		err := fmt.Errorf("failed to consume messages: %w", err)
